@@ -1,6 +1,7 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { paginationOptsValidator } from "convex/server";
 
 // Get current user ID
 export const getCurrentUser = query({
@@ -96,18 +97,22 @@ export const sendMessage = mutation({
     },
 });
 
-// Query to get messages from a room
+// Query to get messages from a room with pagination
 export const getMessages = query({
-    args: { roomId: v.id("rooms") },
-    handler: async (ctx, { roomId }) => {
-        const messages = await ctx.db
+    args: { 
+      roomId: v.id("rooms"),
+      paginationOpts: paginationOptsValidator,
+    },
+    handler: async (ctx, { roomId, paginationOpts }) => {
+        const messagesQuery = ctx.db
             .query("messages")
             .withIndex("by_room", (q) => q.eq("roomId", roomId))
-            .order("desc")
-            .take(50);
+            .order("desc");
+
+        const messages = await messagesQuery.paginate(paginationOpts);
 
         // Get all unique user IDs from messages
-        const userIds = new Set(messages.map(m => m.userId));
+        const userIds = new Set(messages.page.map(m => m.userId));
         
         // Get user data for each message
         const users = await Promise.all(
@@ -120,10 +125,15 @@ export const getMessages = query({
         );
 
         // Add user data to each message
-        return messages.map(message => ({
+        const messagesWithUsers = messages.page.map(message => ({
             ...message,
             user: userMap.get(message.userId),
         }));
+
+        return {
+            ...messages,
+            page: messagesWithUsers,
+        };
     },
 });
 
@@ -139,4 +149,34 @@ export const getRooms = query({
 
         return rooms;
     },
+});
+
+// Delete message mutation
+export const deleteMessage = mutation({
+  args: { messageId: v.id("messages") },
+  handler: async (ctx, { messageId }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) {
+      throw new Error("Not authenticated");
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      throw new Error("Message not found");
+    }
+
+    // Check if the user owns this message
+    if (message.userId !== userId) {
+      throw new Error("Cannot delete messages from other users");
+    }
+
+    // Soft delete the message
+    await ctx.db.patch(messageId, {
+      isDeleted: true,
+      body: "This message has been deleted"
+    });
+
+    return true;
+  },
 });
